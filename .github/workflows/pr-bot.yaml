@@ -25,7 +25,7 @@ jobs:
       - name: Post help message
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prNumber = context.payload.pull_request.number;
@@ -95,7 +95,7 @@ jobs:
         id: process-event
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
@@ -356,7 +356,7 @@ jobs:
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && !fromJSON(steps.process-event.outputs.result).alreadyProcessed }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
@@ -436,7 +436,7 @@ jobs:
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'SQUASH_MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && !fromJSON(steps.process-event.outputs.result).alreadyProcessed }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
@@ -545,14 +545,14 @@ jobs:
             gh pr comment "$PR_NUMBER" --body "❌ Failed to rebase PR due to conflicts. Please resolve conflicts manually."
           fi
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ secrets.ROBERT_PATT }}
 
       # Handle close command
       - name: Close PR
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'CLOSE' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
@@ -588,7 +588,7 @@ jobs:
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'REOPEN' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
@@ -624,7 +624,7 @@ jobs:
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'CANCEL_MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
         uses: actions/github-script@v7
         with:
-          github-token: ${{ github.token }}
+          github-token: ${{ secrets.ROBERT_PATT }}
           script: |
             const { owner, repo } = context.repo;
             const prDetails = JSON.parse(process.env.PR_DETAILS);
