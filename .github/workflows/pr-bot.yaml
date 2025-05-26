@@ -1,0 +1,670 @@
+name: PR Commands
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review:
+    types: [submitted]
+  pull_request:
+    types: [opened, reopened] 
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write  # For PR comments and reviews
+  checks: read          # For checking CI status
+
+  
+jobs:
+  post-help-message:
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'reopened') }}
+    steps:
+
+          
+      - name: Post help message
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prNumber = context.payload.pull_request.number;
+            
+            const helpMessage = `## Bot commands and options
+
+            You can trigger bot actions by commenting on this PR:
+
+            * \`@bot merge\` will merge this PR once all required checks and approvals are in place
+            * \`@bot squash and merge\` will squash and merge this PR once all required checks and approvals are in place
+            * \`@bot rebase\` will rebase this PR onto the base branch
+            * \`@bot cancel merge\` will cancel a previously requested merge
+            * \`@bot reopen\` will reopen this PR if it is closed
+            * \`@bot close\` will close this PR`;
+            
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: prNumber,
+              body: helpMessage
+            });
+
+  pr-commands:
+    runs-on: ubuntu-latest
+    # Run on PR comments or pull request reviews
+    if: ${{ github.event.issue.pull_request || github.event_name == 'pull_request_review' }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Get the PR details
+      - name: Get PR details
+        id: pr-details
+        uses: actions/github-script@v7
+        with:
+          script: |
+            let prNumber;
+             
+            if (context.eventName === 'issue_comment') {
+              prNumber = context.issue.number;
+            } else if (context.eventName === 'pull_request_review') {
+              prNumber = context.payload.pull_request.number;
+            }
+            
+            const { owner, repo } = context.repo;
+            const { data: pr } = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: prNumber
+            });
+            
+            return {
+              prRef: pr.head.ref,
+              prSHA: pr.head.sha,
+              prBranch: pr.head.ref,
+              baseBranch: pr.base.ref,
+              prNumber: prNumber,
+              prNodeId: pr.node_id,
+              prState: pr.state, // Added to check if PR is already merged
+              prMerged: pr.merged // Added to check if PR is already merged
+            };
+
+      # Process events (comments or reviews)
+      - name: Process events
+        id: process-event
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            // Check if PR is already merged
+            const prAlreadyMerged = prDetails.prMerged === true;
+            if (prAlreadyMerged) {
+              console.log(`PR #${prNumber} is already merged. Skipping merge operations.`);
+            }
+            
+            // Function to check if PR is mergeable and perform merge if possible
+            async function checkIfMergeable(mergeMethod = 'merge') {
+              try {
+                // Don't attempt to merge if already merged
+                if (prAlreadyMerged) {
+                  console.log(`PR #${prNumber} is already merged. Skipping merge attempt.`);
+                  return { merged: true, alreadyMerged: true };
+                }
+                
+                // Get PR details including mergeable status
+                const { data: pr } = await github.rest.pulls.get({
+                  owner,
+                  repo,
+                  pull_number: prNumber
+                });
+                
+                console.log(`PR #${prNumber} mergeable: ${pr.mergeable}, mergeable_state: ${pr.mergeable_state}`);
+                
+                // If PR is mergeable and in a clean state, merge it
+                const mergeableStatesThatAllowMerging = ['clean', 'unstable'];
+                if (pr.mergeable && mergeableStatesThatAllowMerging.includes(pr.mergeable_state)) {
+                  console.log(`PR #${prNumber} is ready to merge, proceeding with ${mergeMethod}`);
+                  
+                  // Execute the merge
+                  await github.rest.pulls.merge({
+                    owner,
+                    repo,
+                    pull_number: prNumber,
+                    merge_method: mergeMethod
+                  });
+                  
+                  // Post success comment
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: `✅ PR has been ${mergeMethod === 'squash' ? 'squashed and ' : ''}merged successfully.`
+                  });
+                  
+                  // Clean up any pending merge comments
+                  try {
+                    const { data: comments } = await github.rest.issues.listComments({
+                      owner,
+                      repo,
+                      issue_number: prNumber
+                    });
+                    
+                    const pendingComments = comments.filter(comment => 
+                      comment.body.includes('Will merge automatically') || 
+                      comment.body.includes('Will squash and merge automatically')
+                    );
+                    
+                    for (const comment of pendingComments) {
+                      await github.rest.issues.deleteComment({
+                        owner,
+                        repo,
+                        comment_id: comment.id
+                      });
+                    }
+                  } catch (cleanupError) {
+                    console.log(`Failed to clean up comments: ${cleanupError.message}`);
+                  }
+                  
+                  console.log(`Successfully merged PR #${prNumber} using ${mergeMethod} method`);
+                  return { merged: true, alreadyMerged: false };
+                } else {
+                  console.log(`PR #${prNumber} is not ready to merge. Mergeable: ${pr.mergeable}, State: ${pr.mergeable_state}`);
+                  return { merged: false, alreadyMerged: false };
+                }
+              } catch (error) {
+                if (error.message.includes('already merged')) {
+                  console.log(`PR #${prNumber} was already merged.`);
+                  return { merged: true, alreadyMerged: true, error: error.message };
+                }
+                console.error(`Error checking or merging PR: ${error.message}`);
+                return { merged: false, alreadyMerged: false, error: error.message };
+              }
+            }
+            
+            // Handle issue comment events (commands)
+            if (context.eventName === 'issue_comment') {
+              const commentBody = context.payload.comment.body.trim();
+              const commenter = context.payload.comment.user.login;
+              
+              // Define recognized commands
+              const commands = {
+                MERGE: /^@bot\s+merge\b/i,
+                REBASE: /^@bot\s+rebase\b/i,
+                SQUASH_MERGE: /^@bot\s+squash\s+and\s+merge\b/i,
+                CANCEL_MERGE: /^@bot\s+cancel\s+merge\b/i,
+                REOPEN: /^@bot\s+reopen\b/i,
+                CLOSE: /^@bot\s+close\b/i,
+              };
+              
+              // Check permissions - should be a collaborator or owner
+              let hasPermission = false;
+              try {
+                const { data: permission } = await github.rest.repos.getCollaboratorPermissionLevel({
+                  owner,
+                  repo,
+                  username: commenter
+                });
+                
+                hasPermission = ['admin', 'write'].includes(permission.permission);
+              } catch (error) {
+                console.log(`Error checking permissions: ${error}`);
+                return { command: 'NONE', hasPermission: false, actionType: 'command' };
+              }
+              
+              if (!hasPermission) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: `@${commenter} You don't have permission to use PR commands.`
+                });
+                return { command: 'NONE', hasPermission: false, actionType: 'command' };
+              }
+              
+              // Check for each command
+              let command = 'NONE';
+              for (const [cmd, regex] of Object.entries(commands)) {
+                if (regex.test(commentBody)) {
+                  command = cmd;
+                  break;
+                }
+              }
+              
+              // For merge commands, check if PR is mergeable and merge it
+              if (command === 'MERGE') {
+                
+                const mergeResult = await checkIfMergeable('merge');
+                if (mergeResult.alreadyMerged) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: `❌ Failed to merge PR: ${mergeResult.error || 'PR is already merged'}`
+                  });
+                  return { 
+                    command: 'MERGE', 
+                    hasPermission: true, 
+                    actionType: 'command',
+                    alreadyProcessed: true 
+                  };
+                } else if (!mergeResult.merged) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: `PR is not in a mergeable state yet. Will merge automatically when all required approvals are received and checks pass.`
+                  });
+                  return { command: 'WAIT_FOR_MERGE', hasPermission: true, actionType: 'command' };
+                } else {
+                  // Successfully merged in this step
+                  return { 
+                    command: 'MERGE', 
+                    hasPermission: true, 
+                    actionType: 'command',
+                    alreadyProcessed: true 
+                  };
+                }
+              } else if (command === 'SQUASH_MERGE') {
+                
+                const mergeResult = await checkIfMergeable('squash');
+                if (mergeResult.alreadyMerged) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: `❌ Failed to squash and merge PR: ${mergeResult.error || 'PR is already merged'}`
+                  });
+                  return { 
+                    command: 'SQUASH_MERGE', 
+                    hasPermission: true, 
+                    actionType: 'command',
+                    alreadyProcessed: true 
+                  };
+                } else if (!mergeResult.merged) {
+                  await github.rest.issues.createComment({
+                    owner,
+                    repo,
+                    issue_number: prNumber,
+                    body: `PR is not in a mergeable state yet. Will squash and merge automatically when all required approvals are received and checks pass.`
+                  });
+                  return { command: 'WAIT_FOR_SQUASH_MERGE', hasPermission: true, actionType: 'command' };
+                } else {
+                  // Successfully merged in this step
+                  return { 
+                    command: 'SQUASH_MERGE', 
+                    hasPermission: true, 
+                    actionType: 'command',
+                    alreadyProcessed: true 
+                  };
+                }
+              }
+              
+              return { command, hasPermission: true, actionType: 'command' };
+            } 
+            // Handle pull request review events
+            else if (context.eventName === 'pull_request_review') {
+              const review = context.payload.review;
+              const reviewState = review.state;
+              
+              // Only process approved reviews
+              if (reviewState === 'approved') {
+                // Check if this PR has been previously tagged for merge
+                const { data: comments } = await github.rest.issues.listComments({
+                  owner,
+                  repo,
+                  issue_number: prNumber
+                });
+                
+                // Look for a comment indicating merge pending
+                const pendingMergeComment = comments.find(comment => 
+                  comment.body.includes('Will merge automatically') || 
+                  comment.body.includes('Will squash and merge automatically')
+                );
+                
+                // If there's a pending comment, try to merge
+                if (pendingMergeComment) {
+                  // Determine merge method based on the pending comment
+                  const mergeMethod = pendingMergeComment.body.includes('squash') ? 'squash' : 'merge';
+                  
+                  // Try to merge if the PR is mergeable
+                  const mergeResult = await checkIfMergeable(mergeMethod);
+                  if (mergeResult.merged) {
+                    return { 
+                      command: mergeMethod === 'squash' ? 'SQUASH_MERGE' : 'MERGE', 
+                      hasPermission: true, 
+                      actionType: 'review', 
+                      alreadyProcessed: true 
+                    };
+                  }
+                }
+              }
+              
+              return { command: 'NONE', hasPermission: true, actionType: 'review' };
+            }
+            
+            return { command: 'NONE', hasPermission: false, actionType: 'unknown' };
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
+
+      # Handle merge command
+      - name: Merge PR
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && !fromJSON(steps.process-event.outputs.result).alreadyProcessed }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            // Check if PR is already merged
+            if (prDetails.prMerged) {
+              console.log(`PR #${prNumber} is already merged, skipping merge operation`);
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `❌ Failed to merge PR: PR is already merged`
+              });
+              return;
+            }
+            
+            try {
+              // Attempt to merge the PR
+              await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: prNumber,
+                merge_method: 'merge'
+              });
+      
+              // Post success comment
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `✅ PR has been merged successfully.`
+              });
+              
+              // Clean up any pending merge comments
+              try {
+                const { data: comments } = await github.rest.issues.listComments({
+                  owner,
+                  repo,
+                  issue_number: prNumber
+                });
+                
+                const pendingComments = comments.filter(comment => 
+                  comment.body.includes('Will merge automatically') || 
+                  comment.body.includes('Will squash and merge automatically')
+                );
+                
+                for (const comment of pendingComments) {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: comment.id
+                  });
+                }
+              } catch (cleanupError) {
+                console.log(`Failed to clean up comments: ${cleanupError.message}`);
+              }
+      
+            } catch (error) {
+              console.log(`Failed to merge PR: ${error.message}`);
+              
+              // Post comment about merge failure if not already waiting for approvals
+              if (!error.message.includes('review') && !error.message.includes('approval')) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: `❌ Failed to merge PR: ${error.message}`
+                });
+              }
+            }
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
+      
+      # Handle squash and merge command
+      - name: Squash and Merge PR
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'SQUASH_MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && !fromJSON(steps.process-event.outputs.result).alreadyProcessed }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            // Check if PR is already merged
+            if (prDetails.prMerged) {
+              console.log(`PR #${prNumber} is already merged, skipping squash and merge operation`);
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `❌ Failed to squash and merge PR: PR is already merged`
+              });
+              return;
+            }
+            
+            try {
+              // Try to squash and merge immediately
+              await github.rest.pulls.merge({
+                owner,
+                repo,
+                pull_number: prNumber,
+                merge_method: 'squash'
+              });
+              
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `✅ PR has been squashed and merged successfully.`
+              });
+              
+              // Clean up any pending merge comments
+              try {
+                const { data: comments } = await github.rest.issues.listComments({
+                  owner,
+                  repo,
+                  issue_number: prNumber
+                });
+                
+                const pendingComments = comments.filter(comment => 
+                  comment.body.includes('Will merge automatically') || 
+                  comment.body.includes('Will squash and merge automatically')
+                );
+                
+                for (const comment of pendingComments) {
+                  await github.rest.issues.deleteComment({
+                    owner,
+                    repo,
+                    comment_id: comment.id
+                  });
+                }
+              } catch (cleanupError) {
+                console.log(`Failed to clean up comments: ${cleanupError.message}`);
+              }
+            } catch (error) {
+              console.log(`Failed to squash and merge PR: ${error.message}`);
+              
+              // Post comment about merge failure if not already waiting for approvals
+              if (!error.message.includes('review') && !error.message.includes('approval')) {
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: prNumber,
+                  body: `❌ Failed to squash and merge PR: ${error.message}`
+                });
+              }
+            }
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
+
+      # Handle rebase command  
+      - name: Rebase PR
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'REBASE' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
+        run: |
+          # Set git config
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          
+          PR_BRANCH="${{ fromJSON(steps.pr-details.outputs.result).prBranch }}"
+          BASE_BRANCH="${{ fromJSON(steps.pr-details.outputs.result).baseBranch }}"
+          
+          # Fetch all branches
+          git fetch origin
+          
+          # Check out the PR branch
+          git checkout "$PR_BRANCH"
+          
+          # Rebase onto the base branch
+          if git rebase "origin/$BASE_BRANCH"; then
+            # Force push the rebased branch
+            git push --force-with-lease origin "$PR_BRANCH"
+            echo "Rebase and push successful"
+            
+            # Add a comment to the PR
+            PR_NUMBER="${{ fromJSON(steps.pr-details.outputs.result).prNumber }}"
+            
+            gh pr comment "$PR_NUMBER" --body "✅ PR has been rebased successfully."
+          else
+            # Rebase failed, abort and notify
+            git rebase --abort
+            
+            PR_NUMBER="${{ fromJSON(steps.pr-details.outputs.result).prNumber }}"
+            
+            gh pr comment "$PR_NUMBER" --body "❌ Failed to rebase PR due to conflicts. Please resolve conflicts manually."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # Handle close command
+      - name: Close PR
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'CLOSE' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            try {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: prNumber,
+                state: 'closed'
+              });
+              
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `✅ PR has been closed.`
+              });
+            } catch (error) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `❌ Failed to close PR: ${error.message}`
+              });
+            }
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
+
+      # Handle reopen command
+      - name: Reopen PR
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'REOPEN' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            try {
+              await github.rest.pulls.update({
+                owner,
+                repo,
+                pull_number: prNumber,
+                state: 'open'
+              });
+              
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `✅ PR has been reopened.`
+              });
+            } catch (error) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `❌ Failed to reopen PR: ${error.message}`
+              });
+            }
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
+
+      # Handle cancel merge command
+      - name: Cancel merge
+        if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'CANCEL_MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && fromJSON(steps.process-event.outputs.result).actionType == 'command' }}
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const prDetails = JSON.parse(process.env.PR_DETAILS);
+            const prNumber = prDetails.prNumber;
+            
+            try {
+              // Remove pending merge indicator comments
+              const { data: comments } = await github.rest.issues.listComments({
+                owner,
+                repo,
+                issue_number: prNumber
+              });
+              
+              // Find and delete the pending merge comments
+              const pendingMergeComments = comments.filter(comment => 
+                comment.body.includes('Will merge automatically') || 
+                comment.body.includes('Will squash and merge automatically')
+              );
+              
+              for (const comment of pendingMergeComments) {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id
+                });
+              }
+              
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `✅ Pending merge has been canceled.`
+              });
+            } catch (error) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: prNumber,
+                body: `❌ Failed to cancel merge: ${error.message}`
+              });
+            }
+        env:
+          PR_DETAILS: ${{ steps.pr-details.outputs.result }}
