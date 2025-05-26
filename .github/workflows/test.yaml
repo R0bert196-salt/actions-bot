@@ -1,0 +1,19 @@
+name: Test Workflow
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Log test message
+      run: echo "Hello from GitHub Actions! Push to main detected."
+    
+    - name: Show current date
+      run: date
+    
+    - name: List files
+      run: ls -la
