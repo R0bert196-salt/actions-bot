@@ -431,6 +431,7 @@ jobs:
         env:
           PR_DETAILS: ${{ steps.pr-details.outputs.result }}
       
+          
       # Handle squash and merge command
       - name: Squash and Merge PR
         if: ${{ steps.process-event.outputs.result && fromJSON(steps.process-event.outputs.result).command == 'SQUASH_MERGE' && fromJSON(steps.process-event.outputs.result).hasPermission && !fromJSON(steps.process-event.outputs.result).alreadyProcessed }}
